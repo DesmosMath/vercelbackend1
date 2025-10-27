@@ -1,22 +1,27 @@
 // api/proxy.js
-// Vercel Edge Function Proxy for Roogle Cloud Lineup
+// Vercel Edge Function Proxy for Roogle Cloud Lineup (Upgraded)
+// - Full HTML rewriting for links/forms/scripts
+// - Keeps navigation inside proxy domain
+// - Randomized headers + CSP/XFO stripping
+// - Google CAPTCHA/rate-limit detection
 
 export const config = {
   runtime: "edge",
 };
 
 const RECAPTCHA_WORKER = "https://recaptcha.uraverageopdoge.workers.dev";
+const SELF_BASE = "https://vercelbackend1.vercel.app"; // Change this to your own backend URL
 
 export default async function handler(req) {
   const { searchParams, pathname } = new URL(req.url);
 
-  // Only allow /api/proxy?url=...
+  // Only allow /proxy?url=...
   if (pathname.endsWith("/proxy") && searchParams.has("url")) {
     const target = searchParams.get("url");
     return handleProxy(target);
   }
 
-  return new Response("Use /api/proxy?url=https://example.com", { status: 400 });
+  return new Response("Use /proxy?url=https://example.com", { status: 400 });
 }
 
 async function handleProxy(target) {
@@ -35,7 +40,6 @@ async function handleProxy(target) {
     const upstream = await fetch(target, { method: "GET", headers, redirect: "follow" });
     const contentType = upstream.headers.get("content-type") || "";
 
-    // If blocked or rate-limited
     if (upstream.status === 429 || upstream.status === 403) {
       const redirectUrl = `${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`;
       return Response.redirect(redirectUrl, 302);
@@ -43,7 +47,7 @@ async function handleProxy(target) {
 
     const bodyText = contentType.includes("text") ? await upstream.text() : null;
 
-    // Detect captchas
+    // CAPTCHA Detection
     if (
       bodyText &&
       (bodyText.includes("recaptcha/api.js") ||
@@ -55,7 +59,6 @@ async function handleProxy(target) {
       return Response.redirect(redirectUrl, 302);
     }
 
-    // Clone and modify headers
     const outHeaders = new Headers(upstream.headers);
     stripSecurityHeaders(outHeaders);
     outHeaders.set("Access-Control-Allow-Origin", "*");
@@ -63,14 +66,34 @@ async function handleProxy(target) {
     outHeaders.set("Access-Control-Allow-Headers", "*");
     outHeaders.set("X-Proxied-By", "Roogle Vercel Proxy");
 
-    // Inject <base> if HTML
+    // HTML rewriting section
     if (contentType.includes("text/html") && bodyText !== null) {
       const base = `<base href="${new URL(target).origin}/">`;
-      const rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${base}`);
+      let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${base}`);
+
+      // Rewrite absolute and relative links to stay in proxy
+      rewritten = rewritten
+        .replace(/https?:\/\/([a-zA-Z0-9.-]+)/g, (match) => {
+          return `${SELF_BASE}/proxy?url=${encodeURIComponent(match)}`;
+        })
+        .replace(/href="\/([^"]*)"/g, (match, path) => {
+          const full = new URL(path, target).href;
+          return `href="${SELF_BASE}/proxy?url=${encodeURIComponent(full)}"`;
+        })
+        .replace(/action="\/([^"]*)"/g, (match, path) => {
+          const full = new URL(path, target).href;
+          return `action="${SELF_BASE}/proxy?url=${encodeURIComponent(full)}"`;
+        });
+
+      // Script src rewrite (helps load inline JS through proxy)
+      rewritten = rewritten.replace(/src="https?:\/\/([^"]+)"/g, (m, url) => {
+        return `src="${SELF_BASE}/proxy?url=https://${url}"`;
+      });
+
       return new Response(rewritten, { status: 200, headers: outHeaders });
     }
 
-    // Return normal response
+    // Pass through for binary/non-text
     return new Response(bodyText === null ? upstream.body : bodyText, {
       status: upstream.status,
       headers: outHeaders,
@@ -97,12 +120,7 @@ function stripSecurityHeaders(headers) {
 }
 
 function randomAcceptLang() {
-  const langs = [
-    "en-US,en;q=0.9",
-    "en-GB,en;q=0.8",
-    "en;q=0.7",
-    "en-US,en-CA;q=0.8",
-  ];
+  const langs = ["en-US,en;q=0.9", "en-GB,en;q=0.8", "en;q=0.7", "en-US,en-CA;q=0.8"];
   return langs[Math.floor(Math.random() * langs.length)];
 }
 
