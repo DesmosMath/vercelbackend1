@@ -1,27 +1,24 @@
 // api/proxy.js
-// Vercel Edge Function Proxy for Roogle Cloud Lineup (Upgraded)
-// - Full HTML rewriting for links/forms/scripts
-// - Keeps navigation inside proxy domain
-// - Randomized headers + CSP/XFO stripping
-// - Google CAPTCHA/rate-limit detection
+// Roogle Vercel Backend Proxy (with full HTML URL rewriting)
 
 export const config = {
   runtime: "edge",
 };
 
 const RECAPTCHA_WORKER = "https://recaptcha.uraverageopdoge.workers.dev";
-const SELF_BASE = "https://vercelbackend1.vercel.app"; // Change this to your own backend URL
+const SELF_BASE = "https://vercelbackend1.vercel.app/api/proxy?url="; // <— change if your domain changes
 
 export default async function handler(req) {
-  const { searchParams, pathname } = new URL(req.url);
+  const url = new URL(req.url);
+  const { searchParams, pathname } = url;
 
-  // Only allow /proxy?url=...
-  if (pathname.endsWith("/proxy") && searchParams.has("url")) {
+  // handle both /proxy and /api/proxy paths
+  if ((pathname.endsWith("/proxy") || pathname.endsWith("/api/proxy")) && searchParams.has("url")) {
     const target = searchParams.get("url");
     return handleProxy(target);
   }
 
-  return new Response("Use /proxy?url=https://example.com", { status: 400 });
+  return new Response("Use /api/proxy?url=https://example.com", { status: 400 });
 }
 
 async function handleProxy(target) {
@@ -31,34 +28,30 @@ async function handleProxy(target) {
     headers.set("Accept-Language", randomAcceptLang());
     headers.set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
     headers.set("Referer", new URL(target).origin + "/");
-    headers.set("Sec-Fetch-Site", "none");
-    headers.set("Sec-Fetch-Mode", "navigate");
-    headers.set("Sec-Fetch-User", "?1");
-    headers.set("Sec-Fetch-Dest", "document");
     headers.set("Upgrade-Insecure-Requests", "1");
 
-    const upstream = await fetch(target, { method: "GET", headers, redirect: "follow" });
+    const upstream = await fetch(target, { headers, redirect: "follow" });
     const contentType = upstream.headers.get("content-type") || "";
+    const status = upstream.status;
 
-    if (upstream.status === 429 || upstream.status === 403) {
-      const redirectUrl = `${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`;
-      return Response.redirect(redirectUrl, 302);
+    // Redirect to recaptcha handler if blocked
+    if (status === 429 || status === 403) {
+      return Response.redirect(`${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`, 302);
     }
 
     const bodyText = contentType.includes("text") ? await upstream.text() : null;
 
-    // CAPTCHA Detection
+    // Detect captcha pages
     if (
       bodyText &&
       (bodyText.includes("recaptcha/api.js") ||
-        bodyText.includes("Our systems have detected unusual traffic") ||
-        bodyText.includes("detected unusual traffic from your computer network") ||
+        bodyText.includes("detected unusual traffic") ||
         bodyText.includes("To continue, please type the characters you see"))
     ) {
-      const redirectUrl = `${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`;
-      return Response.redirect(redirectUrl, 302);
+      return Response.redirect(`${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`, 302);
     }
 
+    // Copy headers but strip security
     const outHeaders = new Headers(upstream.headers);
     stripSecurityHeaders(outHeaders);
     outHeaders.set("Access-Control-Allow-Origin", "*");
@@ -66,38 +59,39 @@ async function handleProxy(target) {
     outHeaders.set("Access-Control-Allow-Headers", "*");
     outHeaders.set("X-Proxied-By", "Roogle Vercel Proxy");
 
-    // HTML rewriting section
-    if (contentType.includes("text/html") && bodyText !== null) {
-      const base = `<base href="${new URL(target).origin}/">`;
-      let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${base}`);
+    // If HTML, inject <base> and rewrite URLs
+    if (contentType.includes("text/html") && bodyText) {
+      const baseTag = `<base href="${new URL(target).origin}/">`;
+      let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}`);
 
-      // Rewrite absolute and relative links to stay in proxy
-      rewritten = rewritten
-        .replace(/https?:\/\/([a-zA-Z0-9.-]+)/g, (match) => {
-          return `${SELF_BASE}/proxy?url=${encodeURIComponent(match)}`;
-        })
-        .replace(/href="\/([^"]*)"/g, (match, path) => {
-          const full = new URL(path, target).href;
-          return `href="${SELF_BASE}/proxy?url=${encodeURIComponent(full)}"`;
-        })
-        .replace(/action="\/([^"]*)"/g, (match, path) => {
-          const full = new URL(path, target).href;
-          return `action="${SELF_BASE}/proxy?url=${encodeURIComponent(full)}"`;
-        });
+      // Rewrite <a href="">
+      rewritten = rewritten.replace(
+        /href="(https?:\/\/[^"]+)"/gi,
+        (m, p1) => `href="${SELF_BASE}${encodeURIComponent(p1)}"`
+      );
 
-      // Script src rewrite (helps load inline JS through proxy)
-      rewritten = rewritten.replace(/src="https?:\/\/([^"]+)"/g, (m, url) => {
-        return `src="${SELF_BASE}/proxy?url=https://${url}"`;
-      });
+      // Rewrite relative links like /search or /imgres
+      rewritten = rewritten.replace(
+        /href="(\/[^"]*)"/gi,
+        (m, p1) => `href="${SELF_BASE}${encodeURIComponent(new URL(p1, target).href)}"`
+      );
 
-      return new Response(rewritten, { status: 200, headers: outHeaders });
+      // Rewrite forms (like Google’s search bar)
+      rewritten = rewritten.replace(
+        /<form([^>]*?)action="([^"]*)"([^>]*)>/gi,
+        (m, pre, act, post) => {
+          const proxied = act.startsWith("http")
+            ? `${SELF_BASE}${encodeURIComponent(act)}`
+            : `${SELF_BASE}${encodeURIComponent(new URL(act, target).href)}`;
+          return `<form${pre}action="${proxied}"${post}>`;
+        }
+      );
+
+      return new Response(rewritten, { status, headers: outHeaders });
     }
 
-    // Pass through for binary/non-text
-    return new Response(bodyText === null ? upstream.body : bodyText, {
-      status: upstream.status,
-      headers: outHeaders,
-    });
+    // Non-HTML (JS/CSS/images)
+    return new Response(bodyText === null ? upstream.body : bodyText, { status, headers: outHeaders });
   } catch (err) {
     return new Response("Proxy failed: " + err.message, {
       status: 502,
@@ -106,7 +100,7 @@ async function handleProxy(target) {
   }
 }
 
-/* -------------------- HELPERS -------------------- */
+/* ---------- Helpers ---------- */
 function stripSecurityHeaders(headers) {
   [
     "content-security-policy",
