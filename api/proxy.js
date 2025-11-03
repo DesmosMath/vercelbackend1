@@ -1,57 +1,69 @@
 // api/proxy.js
-// Roogle Vercel Backend Proxy (with full HTML URL rewriting)
+// Roogle Vercel Backend Proxy (supports GET + POST for Google search, with HTML rewriting)
 
 export const config = {
   runtime: "edge",
 };
 
 const RECAPTCHA_WORKER = "https://recaptcha.uraverageopdoge.workers.dev";
-const SELF_BASE = "https://vercelbackend1.vercel.app/api/proxy?url="; // <— change if your domain changes
+const SELF_BASE = "https://vercelbackend1.vercel.app/api/proxy?url="; // change if your Vercel URL changes
 
 export default async function handler(req) {
   const url = new URL(req.url);
   const { searchParams, pathname } = url;
 
-  // handle both /proxy and /api/proxy paths
-  if ((pathname.endsWith("/proxy") || pathname.endsWith("/api/proxy")) && searchParams.has("url")) {
+  if (
+    (pathname.endsWith("/proxy") || pathname.endsWith("/api/proxy")) &&
+    searchParams.has("url")
+  ) {
     const target = searchParams.get("url");
-    return handleProxy(target);
+    return handleProxy(req, target);
   }
 
   return new Response("Use /api/proxy?url=https://example.com", { status: 400 });
 }
 
-async function handleProxy(target) {
+async function handleProxy(req, target) {
   try {
-    const headers = new Headers();
+    const method = req.method || "GET";
+    const headers = new Headers(req.headers);
+
+    // sanitize headers
     headers.set("User-Agent", randomUserAgent());
     headers.set("Accept-Language", randomAcceptLang());
-    headers.set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-    headers.set("Referer", new URL(target).origin + "/");
-    headers.set("Upgrade-Insecure-Requests", "1");
+    headers.delete("host");
+    headers.delete("x-forwarded-for");
+    headers.delete("x-real-ip");
 
-    const upstream = await fetch(target, { headers, redirect: "follow" });
+    let fetchOpts = { method, headers, redirect: "follow" };
+
+    // Handle POST form submissions
+    if (method === "POST") {
+      const body = await req.text();
+      fetchOpts.body = body;
+      headers.set("Content-Type", "application/x-www-form-urlencoded");
+    }
+
+    const upstream = await fetch(target, fetchOpts);
     const contentType = upstream.headers.get("content-type") || "";
     const status = upstream.status;
 
-    // Redirect to recaptcha handler if blocked
     if (status === 429 || status === 403) {
       return Response.redirect(`${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`, 302);
     }
 
     const bodyText = contentType.includes("text") ? await upstream.text() : null;
 
-    // Detect captcha pages
+    // Detect CAPTCHA
     if (
       bodyText &&
       (bodyText.includes("recaptcha/api.js") ||
-        bodyText.includes("detected unusual traffic") ||
-        bodyText.includes("To continue, please type the characters you see"))
+        bodyText.includes("unusual traffic") ||
+        bodyText.includes("type the characters you see"))
     ) {
       return Response.redirect(`${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`, 302);
     }
 
-    // Copy headers but strip security
     const outHeaders = new Headers(upstream.headers);
     stripSecurityHeaders(outHeaders);
     outHeaders.set("Access-Control-Allow-Origin", "*");
@@ -59,30 +71,29 @@ async function handleProxy(target) {
     outHeaders.set("Access-Control-Allow-Headers", "*");
     outHeaders.set("X-Proxied-By", "Roogle Vercel Proxy");
 
-    // If HTML, inject <base> and rewrite URLs
+    // Handle HTML rewriting
     if (contentType.includes("text/html") && bodyText) {
       const baseTag = `<base href="${new URL(target).origin}/">`;
       let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}`);
 
-      // Rewrite <a href="">
+      // Rewrite links
       rewritten = rewritten.replace(
         /href="(https?:\/\/[^"]+)"/gi,
-        (m, p1) => `href="${SELF_BASE}${encodeURIComponent(p1)}"`
+        (_, p1) => `href="${SELF_BASE}${encodeURIComponent(p1)}"`
       );
-
-      // Rewrite relative links like /search or /imgres
       rewritten = rewritten.replace(
         /href="(\/[^"]*)"/gi,
-        (m, p1) => `href="${SELF_BASE}${encodeURIComponent(new URL(p1, target).href)}"`
+        (_, p1) => `href="${SELF_BASE}${encodeURIComponent(new URL(p1, target).href)}"`
       );
 
-      // Rewrite forms (like Google’s search bar)
+      // Rewrite forms (POST + GET)
       rewritten = rewritten.replace(
         /<form([^>]*?)action="([^"]*)"([^>]*)>/gi,
         (m, pre, act, post) => {
-          const proxied = act.startsWith("http")
-            ? `${SELF_BASE}${encodeURIComponent(act)}`
-            : `${SELF_BASE}${encodeURIComponent(new URL(act, target).href)}`;
+          const absolute = act.startsWith("http")
+            ? act
+            : new URL(act, target).href;
+          const proxied = `${SELF_BASE}${encodeURIComponent(absolute)}`;
           return `<form${pre}action="${proxied}"${post}>`;
         }
       );
@@ -90,12 +101,18 @@ async function handleProxy(target) {
       return new Response(rewritten, { status, headers: outHeaders });
     }
 
-    // Non-HTML (JS/CSS/images)
-    return new Response(bodyText === null ? upstream.body : bodyText, { status, headers: outHeaders });
+    // Non-HTML (like JS, CSS, images)
+    return new Response(bodyText === null ? upstream.body : bodyText, {
+      status,
+      headers: outHeaders,
+    });
   } catch (err) {
     return new Response("Proxy failed: " + err.message, {
       status: 502,
-      headers: { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" },
+      headers: {
+        "Content-Type": "text/plain",
+        "Access-Control-Allow-Origin": "*",
+      },
     });
   }
 }
@@ -114,7 +131,12 @@ function stripSecurityHeaders(headers) {
 }
 
 function randomAcceptLang() {
-  const langs = ["en-US,en;q=0.9", "en-GB,en;q=0.8", "en;q=0.7", "en-US,en-CA;q=0.8"];
+  const langs = [
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.8",
+    "en;q=0.7",
+    "en-US,en-CA;q=0.8",
+  ];
   return langs[Math.floor(Math.random() * langs.length)];
 }
 
