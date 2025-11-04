@@ -10,18 +10,21 @@ const SELF_BASE = "https://vercelbackend1.vercel.app/proxy?url="; // update if d
 
 export default async function handler(req) {
   const url = new URL(req.url);
-  const { searchParams, pathname } = url;
+  const pathname = url.pathname;
+  const target = url.searchParams.get("url");
 
-  // Support both /proxy and /api/proxy routes
-  if (
-    (pathname.endsWith("/proxy") || pathname.endsWith("/api/proxy")) &&
-    searchParams.has("url")
-  ) {
-    const target = searchParams.get("url");
+  // Works for both /proxy and /api/proxy, even with or without trailing slashes
+  const isProxyRoute =
+    pathname.endsWith("/proxy") ||
+    pathname.endsWith("/api/proxy") ||
+    pathname === "/proxy" ||
+    pathname === "/api/proxy";
+
+  if (isProxyRoute && target) {
     return handleProxy(req, target);
   }
 
-  return new Response("Use /api/proxy?url=https://example.com", { status: 400 });
+  return new Response("Missing or invalid ?url= parameter.", { status: 400 });
 }
 
 async function handleProxy(req, target) {
@@ -93,9 +96,13 @@ async function handleProxy(req, target) {
 
     // If HTML → inject <base> and rewrite URLs
     if (contentType.includes("text/html") && bodyText) {
-     const baseTag = `<base href="${new URL(target).origin}/">`;
-const injectScriptTag = `<script src="/api/inject.js" async></script>`;
-let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}${injectScriptTag}`);
+      const baseTag = `<base href="${new URL(target).origin}/">`;
+      const injectScriptTag = `<script src="/api/inject.js" async></script>`;
+      let rewritten = bodyText.replace(
+        /<head([^>]*)>/i,
+        (m) => `${m}${baseTag}${injectScriptTag}`
+      );
+
       // Rewrite links (href + src)
       rewritten = rewritten
         .replace(/(href|src)="(https?:\/\/[^"]+)"/gi, (_, attr, link) => {
@@ -107,7 +114,7 @@ let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}${injec
           )}"`;
         });
 
-      // Rewrite forms (search, login, etc.)
+      // Rewrite forms (like Google search)
       rewritten = rewritten.replace(
         /<form([^>]*?)action="([^"]*)"([^>]*)>/gi,
         (m, pre, act, post) => {
