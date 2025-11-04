@@ -6,7 +6,7 @@ export const config = {
 };
 
 const RECAPTCHA_WORKER = "https://recaptcha.uraverageopdoge.workers.dev";
-const SELF_BASE = "https://vercelbackend1.vercel.app/api/proxy?url="; // change if your Vercel URL changes
+const SELF_BASE = "https://vercelbackend1.vercel.app/proxy?url="; // change if your Vercel URL changes
 
 export default async function handler(req) {
   const url = new URL(req.url);
