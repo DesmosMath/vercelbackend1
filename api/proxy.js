@@ -1,5 +1,5 @@
 // api/proxy.js
-// Roogle Vercel Backend Proxy (supports GET + POST for Google search, with HTML rewriting)
+// Roogle Vercel Backend Proxy (GET + POST, Google-safe, HTML rewriting with redirect fix)
 
 export const config = {
   runtime: "edge",
@@ -35,7 +35,7 @@ async function handleProxy(req, target) {
     headers.delete("x-forwarded-for");
     headers.delete("x-real-ip");
 
-    let fetchOpts = { method, headers, redirect: "follow" };
+    let fetchOpts = { method, headers, redirect: "manual" };
 
     // Handle POST form submissions
     if (method === "POST") {
@@ -48,20 +48,38 @@ async function handleProxy(req, target) {
     const contentType = upstream.headers.get("content-type") || "";
     const status = upstream.status;
 
-    if (status === 429 || status === 403) {
-      return Response.redirect(`${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`, 302);
+    // Handle redirects (Google search fix)
+    if (status >= 300 && status < 400 && upstream.headers.get("location")) {
+      const loc = upstream.headers.get("location");
+      const proxied = `${SELF_BASE}${encodeURIComponent(
+        new URL(loc, target).href
+      )}`;
+      return Response.redirect(proxied, 302);
     }
 
-    const bodyText = contentType.includes("text") ? await upstream.text() : null;
+    // CAPTCHA redirect
+    if (status === 429 || status === 403) {
+      return Response.redirect(
+        `${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`,
+        302
+      );
+    }
 
-    // Detect CAPTCHA
+    const bodyText = contentType.includes("text")
+      ? await upstream.text()
+      : null;
+
+    // Detect CAPTCHA in body
     if (
       bodyText &&
       (bodyText.includes("recaptcha/api.js") ||
         bodyText.includes("unusual traffic") ||
         bodyText.includes("type the characters you see"))
     ) {
-      return Response.redirect(`${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`, 302);
+      return Response.redirect(
+        `${RECAPTCHA_WORKER}/?url=${encodeURIComponent(target)}`,
+        302
+      );
     }
 
     const outHeaders = new Headers(upstream.headers);
@@ -76,17 +94,18 @@ async function handleProxy(req, target) {
       const baseTag = `<base href="${new URL(target).origin}/">`;
       let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}`);
 
-      // Rewrite links
-      rewritten = rewritten.replace(
-        /href="(https?:\/\/[^"]+)"/gi,
-        (_, p1) => `href="${SELF_BASE}${encodeURIComponent(p1)}"`
-      );
-      rewritten = rewritten.replace(
-        /href="(\/[^"]*)"/gi,
-        (_, p1) => `href="${SELF_BASE}${encodeURIComponent(new URL(p1, target).href)}"`
-      );
+      // Rewrite href/src links
+      rewritten = rewritten
+        .replace(/(href|src)="(https?:\/\/[^"]+)"/gi, (_, attr, link) => {
+          return `${attr}="${SELF_BASE}${encodeURIComponent(link)}"`;
+        })
+        .replace(/(href|src)="\/([^"]*)"/gi, (_, attr, path) => {
+          return `${attr}="${SELF_BASE}${encodeURIComponent(
+            new URL("/" + path, target).href
+          )}"`;
+        });
 
-      // Rewrite forms (POST + GET)
+      // Rewrite forms
       rewritten = rewritten.replace(
         /<form([^>]*?)action="([^"]*)"([^>]*)>/gi,
         (m, pre, act, post) => {
@@ -101,7 +120,7 @@ async function handleProxy(req, target) {
       return new Response(rewritten, { status, headers: outHeaders });
     }
 
-    // Non-HTML (like JS, CSS, images)
+    // Non-HTML (JS, CSS, images)
     return new Response(bodyText === null ? upstream.body : bodyText, {
       status,
       headers: outHeaders,
