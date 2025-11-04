@@ -93,9 +93,9 @@ async function handleProxy(req, target) {
 
     // If HTML → inject <base> and rewrite URLs
     if (contentType.includes("text/html") && bodyText) {
-      const baseTag = `<base href="${new URL(target).origin}/">`;
-      let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}`);
-
+     const baseTag = `<base href="${new URL(target).origin}/">`;
+const injectScriptTag = `<script src="/api/inject.js" async></script>`;
+let rewritten = bodyText.replace(/<head([^>]*)>/i, (m) => `${m}${baseTag}${injectScriptTag}`);
       // Rewrite links (href + src)
       rewritten = rewritten
         .replace(/(href|src)="(https?:\/\/[^"]+)"/gi, (_, attr, link) => {
