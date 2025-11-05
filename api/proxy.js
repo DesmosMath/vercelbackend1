@@ -137,23 +137,13 @@ async function handleProxy(req, target) {
           return `<form${pre}action="${proxied}"${post}>`;
         }
       );
-// Rewrite forms (like Google search)
-rewritten = rewritten.replace(
-  /<form([^>]*?)action="([^"]*)"([^>]*)>/gi,
-  (m, pre, act, post) => {
-    const absolute = act.startsWith("http")
-      ? act
-      : new URL(act, target).href;
-    const proxied = `${SELF_BASE}${encodeURIComponent(absolute)}`;
-    return `<form${pre}action="${proxied}"${post}>`;
-  }
-);
 
-// Catch JS-based redirects (window.location, top.location, etc.)
-rewritten = rewritten.replace(
-  /window\.location(\.href)?\s*=\s*["'](https?:\/\/[^"']+)["']/gi,
-  (m, _, link) => `window.location.href="${SELF_BASE}${encodeURIComponent(link)}"`
-);
+      // ✅ Catch JS-based redirects (window.location, top.location, etc.)
+      rewritten = rewritten.replace(
+        /window\.location(\.href)?\s*=\s*["'](https?:\/\/[^"']+)["']/gi,
+        (m, _, link) =>
+          `window.location.href="${SELF_BASE_API}${encodeURIComponent(link)}"`
+      );
 
       return new Response(rewritten, { status, headers: outHeaders });
     }
