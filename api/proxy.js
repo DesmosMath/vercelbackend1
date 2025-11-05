@@ -20,11 +20,22 @@ export default async function handler(req) {
     pathname === "/proxy" ||
     pathname === "/api/proxy";
 
-  if (isProxyRoute && target) {
-    return handleProxy(req, target);
+    // Auto-fix Google search forms missing ?url=
+  if (isProxyRoute) {
+    if (target) {
+      return handleProxy(req, target);
+    }
+
+    // if Google form used ?q= instead of ?url=
+    const query = url.searchParams.get("q");
+    if (query) {
+      const googleSearch = "https://www.google.com/search?q=" + encodeURIComponent(query);
+      return handleProxy(req, googleSearch);
+    }
+
+    return new Response("Use /api/proxy?url=https://example.com", { status: 400 });
   }
 
-  return new Response("Missing or invalid ?url= parameter.", { status: 400 });
 }
 
 async function handleProxy(req, target) {
