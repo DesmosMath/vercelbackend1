@@ -1,9 +1,16 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/proxy.js", "use": "@vercel/node" }
+    { "src": "api/proxy.js", "use": "@vercel/node" },
+    { "src": "api/inject.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { "src": "/proxy", "dest": "/api/proxy.js" }
+    { "src": "/proxy", "dest": "/api/proxy.js" },
+    { "src": "/proxy/(.*)", "dest": "/api/proxy.js" },
+
+    { "src": "/api/proxy", "dest": "/api/proxy.js" },
+    { "src": "/api/proxy/(.*)", "dest": "/api/proxy.js" },
+
+    { "src": "/api/inject.js", "dest": "/api/inject.js" }
   ]
 }
